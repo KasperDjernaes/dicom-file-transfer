@@ -15,6 +15,22 @@ This is an example only; use only as a starting point.
 # fully de-identify DICOM data
 
 from __future__ import print_function
+from pydicom.dataset import Dataset
+from pynetdicom import (
+    AE, evt, build_role,
+    PYNETDICOM_IMPLEMENTATION_UID,
+    PYNETDICOM_IMPLEMENTATION_VERSION,
+    StoragePresentationContexts
+)
+from pynetdicom.sop_class import (
+    PatientRootQueryRetrieveInformationModelMove,
+    CTImageStorage,
+    ComputedRadiographyImageStorage
+)
+import os
+import os.path
+import pydicom
+
 
 usage = """
 Usage:
@@ -26,12 +42,8 @@ Note: Use at your own risk. Does not fully de-identify the DICOM data as per
 the DICOM standard, e.g in Annex E of PS3.15-2011.
 """
 
-import os
-import os.path
-import dicom
 
-
-def anonymize(filename, output_filename, new_person_name="anonymous",
+def anonymize(dataset, new_person_name="anonymous",
               new_patient_id="id", remove_curves=True, remove_private_tags=True):
     """Replace data element values to partly anonymize a DICOM file.
     Note: completely anonymizing a DICOM file is very complicated; there
@@ -49,9 +61,6 @@ def anonymize(filename, output_filename, new_person_name="anonymous",
         if data_element.tag.group & 0xFF00 == 0x5000:
             del ds[data_element.tag]
 
-    # Load the current dicom file to 'anonymize'
-    dataset = dicom.read_file(filename)
-
     # Remove patient name and any other person names
     dataset.walk(PN_callback)
 
@@ -66,7 +75,7 @@ def anonymize(filename, output_filename, new_person_name="anonymous",
             delattr(dataset, name)
 
     # Same as above but for blanking data elements that are type 2.
-    for name in ['PatientBirthDate']:
+    for name in ['PatientBirthDate', "PatientSex"]:
         if name in dataset:
             dataset.data_element(name).value = ''
 
@@ -76,5 +85,35 @@ def anonymize(filename, output_filename, new_person_name="anonymous",
     if remove_curves:
         dataset.walk(curves_callback)
 
-    # write the 'anonymized' DICOM out under the new filename
-    dataset.save_as(output_filename)
+    # return the 'anonymized' DICOM
+    return dataset
+
+
+# Implement the handler for evt.EVT_C_STORE
+def handle_store(event):
+    """Handle a C-STORE request event."""
+    ds = event.dataset
+    context = event.context
+
+    # Add the DICOM File Meta Information
+    meta = Dataset()
+    meta.MediaStorageSOPClassUID = ds.SOPClassUID
+    meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    meta.ImplementationClassUID = PYNETDICOM_IMPLEMENTATION_UID
+    meta.ImplementationVersionName = PYNETDICOM_IMPLEMENTATION_VERSION
+    meta.TransferSyntaxUID = context.transfer_syntax
+
+    # Add the file meta to the dataset
+    ds.file_meta = meta
+
+    # Set the transfer syntax attributes of the dataset
+    ds.is_little_endian = context.transfer_syntax.is_little_endian
+    ds.is_implicit_VR = context.transfer_syntax.is_implicit_VR
+
+    anonymize(ds)
+
+    # Save the dataset using the SOP Instance UID as the filename
+    ds.save_as(ds.SOPInstanceUID, write_like_original=False)
+
+    # Return a 'Success' status
+    return 0x0000
